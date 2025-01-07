@@ -49,22 +49,12 @@ class MyVCS:
             self.stage_file(filename)
 
         elif choice == '2':
-            try:
-                # Attempting to use Google Colab file upload feature
-                from google.colab import files
-                print("Please select the file to upload:")
-                uploaded = files.upload()
-                if uploaded:
-                    file_name = list(uploaded.keys())[0]
-                    print(f"File '{file_name}' uploaded successfully!")
-                    self.stage_file(file_name)
-                else:
-                    print("No file uploaded.")
-            except ImportError:
-                # Handle non-Colab environments, and prompt user to manually upload a file
-                print("Google Colab's file upload is not available in this environment. Please manually upload a file to continue.")
-                filename = input("Enter the name of the file you want to upload: ")
+            filename = input("Enter the name of the file you want to upload: ")
+            if os.path.exists(filename):
                 self.stage_file(filename)
+                print(f"File '{filename}' uploaded and staged successfully!")
+            else:
+                print("File not found. Please try again.")
 
         elif choice == '3':
             print("Skipping file creation/upload. Repository initialized.")
@@ -96,8 +86,9 @@ class MyVCS:
         Args:
             message (str): Commit message describing the changes.
         """
-        if not os.path.exists(self.staging_dir):
-            os.makedirs(self.staging_dir)
+        if not os.listdir(self.staging_dir):
+            print("No files to commit. Stage files first.")
+            return
 
         commit_id = len(os.listdir(self.commits_dir)) + 1
         commit_path = os.path.join(self.commits_dir, f"commit_{commit_id}")
@@ -147,30 +138,27 @@ class MyVCS:
         print(f"Branch {branch_name} created.")
 
     def checkout_branch(self, branch_name):
-            """
-            Switches to a different branch and resets the staging area.
-            Args:
-                branch_name (str): Name of the branch to switch to.
-            """
-            with open(self.branches_file, 'r') as f:
-                branches = json.load(f)
-            if branch_name not in branches:
-                print("Branch does not exist.")
-                return
-            self.current_branch = branch_name
-            print(f"Switched to -> {branch_name}.")
-            # Ensure staging directory exists before resetting it
-            if not os.path.exists(self.staging_dir):  
-                os.makedirs(self.staging_dir)
-            self.reset_staging()
+        """
+        Switches to a different branch and resets the staging area.
+        Args:
+            branch_name (str): Name of the branch to switch to.
+        """
+        with open(self.branches_file, 'r') as f:
+            branches = json.load(f)
+        if branch_name not in branches:
+            print("Branch does not exist.")
+            return
+        self.current_branch = branch_name
+        print(f"Switched to -> {branch_name}.")
+        self.reset_staging()
 
     def reset_staging(self):
         """
         Clears the staging area to reflect the current branch's state.
         """
-        staged_files = os.listdir(self.staging_dir)
-        for file in staged_files:
-            os.remove(os.path.join(self.staging_dir, file))
+        if os.path.exists(self.staging_dir):
+            shutil.rmtree(self.staging_dir)
+        os.makedirs(self.staging_dir)
         print(f"Staging area reset for -> {self.current_branch}.")
 
     def merge_branch(self, source_branch):
@@ -193,27 +181,19 @@ class MyVCS:
         self.apply_merge_changes(source_branch)
 
     def apply_merge_changes(self, source_branch):
-            """
-            Applies file changes from a merged branch into the staging area.
-            Args:
-                source_branch (str): Name of the branch being merged.
-            """
-            source_commits = self.get_commits_for_branch(source_branch)
-            for commit in source_commits:
-                commit_path = os.path.join(self.commits_dir, f"commit_{commit['id']}")
-                for file_name in os.listdir(commit_path):
-                    source_file = os.path.join(commit_path, file_name)
-                    target_file = os.path.join(self.staging_dir, file_name)
-                    # Check if the staging directory exists and create if needed
-                    if not os.path.exists(self.staging_dir):
-                        os.makedirs(self.staging_dir)  # Create the staging directory 
-                    # Check if the source file exists before copying 
-                    if os.path.exists(source_file):  
-                        if not os.path.exists(target_file):
-                            shutil.copy(source_file, target_file)
-                        print(f"File {file_name} merged from branch {source_branch}.")
-                    else:
-                        print(f"Warning: Source file '{source_file}' not found. Skipping.")
+        """
+        Applies file changes from a merged branch into the staging area.
+        Args:
+            source_branch (str): Name of the branch being merged.
+        """
+        source_commits = self.get_commits_for_branch(source_branch)
+        for commit in source_commits:
+            commit_path = os.path.join(self.commits_dir, f"commit_{commit['id']}")
+            for file_name in os.listdir(commit_path):
+                source_file = os.path.join(commit_path, file_name)
+                target_file = os.path.join(self.staging_dir, file_name)
+                shutil.copy(source_file, target_file)
+                print(f"File {file_name} merged from branch {source_branch}.")
 
     def get_commits_for_branch(self, branch_name):
         """
@@ -235,53 +215,105 @@ class MyVCS:
         Returns:
             List of conflicting files, if any.
         """
-        conflicts = []
-        source_commits = self.get_commits_for_branch(source_branch)
-        target_commits = self.get_commits_for_branch(self.current_branch)
+        try:
+            # Fetch the latest changes from both branches
+            self.repo.git.fetch('origin', self.target_branch)
+            self.repo.git.fetch('origin', source_branch)
 
-        # Check for files present in both branches with differing content
-        for commit in source_commits:
-            source_commit_path = os.path.join(self.commits_dir, f"commit_{commit['id']}")
-            for file_name in os.listdir(source_commit_path):
-                source_file = os.path.join(source_commit_path, file_name)
-                target_commit_path = os.path.join(self.commits_dir, f"commit_{target_commits[-1]['id']}")
-                target_file = os.path.join(target_commit_path, file_name)
+            # Check out to the target branch and attempt a dry-run merge
+            self.repo.git.checkout(self.target_branch)
+            self.repo.git.merge('--no-commit', '--no-ff', source_branch)
+        except GitCommandError as e:
+            if 'CONFLICT' in str(e):
+                # Extract conflicting files from the error message
+                conflict_files = self._parse_conflict_files(str(e))
+                return conflict_files
+            else:
+                raise
+        finally:
+            # Abort the merge to maintain a clean state
+            self.repo.git.merge('--abort')
 
-                if os.path.exists(target_file) and not self.files_are_identical(source_file, target_file):
-                    conflicts.append(file_name)
+        return []  # No conflicts detected
 
-        return conflicts
-
-    def files_are_identical(self, file1, file2):
+    def _parse_conflict_files(self, error_message):
         """
-        Compares two files to see if they are identical.
+        Helper method to parse conflict files from a Git error message.
         Args:
-            file1 (str): Path of the first file.
-            file2 (str): Path of the second file.
+            error_message (str): The Git error message.
         Returns:
-            bool: True if files are identical, otherwise False.
+            List of conflicting file paths.
         """
-        return open(file1, 'rb').read() == open(file2, 'rb').read()
+        conflict_files = []
+        for line in error_message.splitlines():
+            if line.startswith('CONFLICT (content): Merge conflict in'):
+                conflict_files.append(line.split()[-1])
+        return conflict_files
 
-    def resolve_merge_conflicts(self, conflicting_files):
+    def auto_resolve_conflicts(self, resolution_strategy='ours'):
         """
-        Resolves conflicts by providing the user with options to choose a resolution strategy.
+        Automatically resolves conflicts using a specified strategy.
         Args:
-            conflicting_files (list): List of conflicting files to resolve.
+            resolution_strategy (str): Conflict resolution strategy ('ours' or 'theirs').
         """
-        print("Merge conflicts detected!")
-        print("Conflicting files:")
-        for idx, file in enumerate(conflicting_files, 1):
-            print(f"{idx}. {file}")
+        valid_strategies = {'ours', 'theirs'}
+        if resolution_strategy not in valid_strategies:
+            raise ValueError(f"Invalid resolution strategy. Choose from {valid_strategies}.")
 
-        choice = input("Choose how to resolve conflicts:\n1. Keep current branch's version\n2. Use the version from the merged branch\n3. Manually resolve\nEnter 1, 2, or 3: ")
+        try:
+            self.repo.git.checkout('--ours' if resolution_strategy == 'ours' else '--theirs', '.')
+            self.repo.git.add('.')
+            self.repo.git.commit('-m', f'Auto-resolved conflicts using {resolution_strategy} strategy.')
+        except GitCommandError as e:
+            raise RuntimeError(f"Failed to auto-resolve conflicts: {str(e)}")
 
-        if choice == '1':
-            print("Keeping current branch's version.")
-        elif choice == '2':
-            print("Using the version from the merged branch.")
-        elif choice == '3':
-            print("Please manually resolve the conflicts in the conflicting files.")
-            # You may add functionality here to open the files in a text editor for manual resolution.
-        else:
-            print("Invalid choice, no conflicts resolved.")
+    def merge_and_push(self, source_branch):
+        """
+        Merges the source branch into the target branch and pushes the changes.
+        Args:
+            source_branch (str): The name of the branch to merge.
+        Returns:
+            str: Merge status message.
+        """
+        conflicts = self.detect_file_conflicts(source_branch)
+        if conflicts:
+            return f"Merge aborted due to conflicts in files: {', '.join(conflicts)}"
+
+        try:
+            self.repo.git.checkout(self.target_branch)
+            self.repo.git.merge(source_branch)
+            self.repo.git.push('origin', self.target_branch)
+            return f"Successfully merged {source_branch} into {self.target_branch} and pushed changes."
+        except GitCommandError as e:
+            raise RuntimeError(f"Merge and push failed: {str(e)}")
+
+    def create_pr_comment(self, message):
+        """
+        Creates a comment on the pull request (stubbed for integration with an external PR system).
+        Args:
+            message (str): The comment message.
+        """
+        # This is a stub for actual integration with a PR system
+        print(f"PR Comment: {message}")
+
+    def execute_merge_workflow(self, source_branch, auto_resolve=False, resolution_strategy='ours'):
+        """
+        Executes the complete merge workflow with optional auto-resolution of conflicts.
+        Args:
+            source_branch (str): The name of the branch to merge.
+            auto_resolve (bool): Whether to automatically resolve conflicts.
+            resolution_strategy (str): Conflict resolution strategy if auto_resolve is True.
+        Returns:
+            str: Workflow execution status.
+        """
+        conflicts = self.detect_file_conflicts(source_branch)
+        if conflicts:
+            if auto_resolve:
+                self.auto_resolve_conflicts(resolution_strategy)
+                self.repo.git.push('origin', self.target_branch)
+                return f"Conflicts auto-resolved using {resolution_strategy} strategy and changes pushed."
+            else:
+                return f"Merge aborted due to conflicts in files: {', '.join(conflicts)}"
+
+        return self.merge_and_push(source_branch)
+
